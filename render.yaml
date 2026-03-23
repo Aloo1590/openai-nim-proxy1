@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: nim-proxy
+    runtime: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    envVars:
+      - key: NIM_API_KEY
+        sync: false
