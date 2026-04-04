@@ -19,17 +19,17 @@ if (!NIM_API_KEY) {
 const REASONING_MODELS = new Set([
   "z-ai/glm5",
   "z-ai/glm4.7",
-  "deepseek-ai/deepseek-v3.1",
-  "deepseek-ai/deepseek-v3.1-terminus",
+  "deepseek-ai/deepseek-v3.2",
+  "google/gemma-4-31b-it",
   "moonshotai/kimi-k2.5",
 ]);
 
 const MODEL_MAP = {
   "glm5": "z-ai/glm5",
   "glm4.7": "z-ai/glm4.7",
-  "kimi": "moonshotai/kimi-k2.5",
-  "deepseek-v3.1": "deepseek-ai/deepseek-v3.1",
-  "deepseek-v3.1-terminus": "deepseek-ai/deepseek-v3.1-terminus",
+  "gemini4": "google/gemma-4-31b-it",
+  "deepseek-v3.2": "deepseek-ai/deepseek-v3.2",
+  "kimi2.5": "moonshotai/kimi-k2.5",
 };
 
 /* ------------------ HELPERS ------------------ */
