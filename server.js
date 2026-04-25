@@ -20,7 +20,7 @@ const REASONING_MODELS = new Set([
   "minimaxai/minimax-m2.7",
   "z-ai/glm4.7",
   "google/gemma-4-31b-it",
-  "deepseek-ai/deepseek-v3.2",
+  "deepseek-ai/deepseek-v4-pro",
   "z-ai/glm-5.1",
 ]);
 
@@ -28,7 +28,7 @@ const MODEL_MAP = {
   "minimax": "minimaxai/minimax-m2.7",
   "glm4.7": "z-ai/glm4.7",
   "gemma4": "google/gemma-4-31b-it",
-  "deepseek-v3.2": "deepseek-ai/deepseek-v3.2",
+  "deepseek-v3.2": "deepseek-ai/deepseek-v4-pro",
   "glm5.1": "z-ai/glm-5.1",
 };
 
