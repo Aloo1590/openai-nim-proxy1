@@ -9,6 +9,7 @@ app.use(express.json({ limit: "20mb" }));
 
 const NIM_API_KEY = process.env.NIM_API_KEY;
 const NIM_API_BASE = "https://integrate.api.nvidia.com/v1";
+const REQUEST_TIMEOUT_MS = 120_000;
 
 if (!NIM_API_KEY) {
   console.warn("⚠️ NIM_API_KEY not set");
@@ -24,20 +25,13 @@ const REASONING_MODELS = new Set([
   "z-ai/glm-5.2",
 ]);
 
-const MODEL_MAP = {
-  "step": "stepfun-ai/step-3.7-flash",
-  "minimax-m3": "minimaxai/minimax-m3",
-  "gemma4": "google/gemma-4-31b-it",
-  "deepseek-v4-pro": "deepseek-ai/deepseek-v4-pro",
-  "glm5.2": "z-ai/glm-5.2",
-};
+const DEFAULT_MODEL = "meta/llama-3.1-8b-instruct";
 
 /* ------------------ HELPERS ------------------ */
 
-function resolveModel(model = "") {
-  if (MODEL_MAP[model]) return MODEL_MAP[model];
-  if (model.includes("/")) return model;
-  return "meta/llama-3.1-8b-instruct";
+function resolveModel(model) {
+  if (typeof model !== "string" || model.trim().length === 0) return DEFAULT_MODEL;
+  return model.trim();
 }
 
 function buildBody(body, model) {
@@ -60,40 +54,88 @@ function buildBody(body, model) {
 }
 
 /* ------------------ STREAM FIX ------------------ */
+/**
+ * Creates a stateful transformer for one streaming request.
+ *
+ * Fixes vs. the original implementation:
+ *  1. Buffers partial lines across chunk boundaries. `reader.read()` chunks
+ *     do not align with SSE "line" boundaries, so a JSON payload could
+ *     previously be split across two reads, fail JSON.parse, and pass
+ *     through unmodified (silently dropping the reasoning wrap for that
+ *     event, or corrupting the message the client renders).
+ *  2. Emits exactly one opening `<think>` and one closing `</think>` per
+ *     reasoning span, instead of wrapping every individual delta chunk in
+ *     its own `<think>...</think>` pair (which produced many broken/nested
+ *     tags client-side instead of one continuous reasoning block).
+ *  3. Strips `reasoning_content` from the outgoing delta once it's been
+ *     folded into `content`, since most downstream clients (Janitor AI
+ *     included) only render `content`.
+ */
+function createReasoningTransformer() {
+  let buffer = "";
+  let thinkOpen = false;
 
-function rewriteChunk(raw) {
-  return raw
-    .split("\n")
-    .map((line) => {
-      if (!line.startsWith("data: ")) return line;
+  function transformLine(line) {
+    if (!line.startsWith("data: ")) return line;
 
-      const jsonStr = line.slice(6);
-      if (jsonStr === "[DONE]") return line;
+    const jsonStr = line.slice(6).trim();
+    if (!jsonStr || jsonStr === "[DONE]") return line;
 
-      try {
-        const parsed = JSON.parse(jsonStr);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch {
+      return line;
+    }
 
-        if (!parsed.choices) return line;
+    if (!parsed.choices) return line;
 
-        parsed.choices = parsed.choices.map((choice) => {
-          const delta = choice.delta || {};
+    parsed.choices = parsed.choices.map((choice) => {
+      const delta = { ...(choice.delta || {}) };
+      const reasoning = delta.reasoning_content;
+      let content = delta.content || "";
 
-          const reasoning = delta.reasoning_content;
-          const content = delta.content || "";
-
-          if (reasoning) {
-            delta.content = `<think>${reasoning}</think>` + content;
-          }
-
-          return { ...choice, delta };
-        });
-
-        return `data: ${JSON.stringify(parsed)}`;
-      } catch {
-        return line;
+      if (reasoning) {
+        content = (thinkOpen ? "" : "<think>") + reasoning + content;
+        thinkOpen = true;
+      } else if (thinkOpen) {
+        content = "</think>" + content;
+        thinkOpen = false;
       }
-    })
-    .join("\n");
+
+      delta.content = content;
+      delete delta.reasoning_content;
+
+      return { ...choice, delta };
+    });
+
+    return `data: ${JSON.stringify(parsed)}`;
+  }
+
+  return {
+    push(raw) {
+      buffer += raw;
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep the possibly-incomplete final line
+      return lines.map(transformLine).join("\n") + (lines.length ? "\n" : "");
+    },
+    // Call once the upstream stream ends, to flush any trailing partial
+    // line and close an unterminated <think> block.
+    flush() {
+      let out = "";
+      if (buffer) {
+        out += transformLine(buffer);
+        buffer = "";
+      }
+      if (thinkOpen) {
+        out += (out ? "\n" : "") + `data: ${JSON.stringify({
+          choices: [{ index: 0, delta: { content: "</think>" } }],
+        })}`;
+        thinkOpen = false;
+      }
+      return out;
+    },
+  };
 }
 
 /* ------------------ ROUTES ------------------ */
@@ -105,10 +147,10 @@ app.get("/health", (_, res) => {
 app.get("/v1/models", (_, res) => {
   res.json({
     object: "list",
-    data: Object.keys(MODEL_MAP).map((id) => ({
+    data: [...REASONING_MODELS, DEFAULT_MODEL].map((id) => ({
       id,
       object: "model",
-      reasoning_capable: REASONING_MODELS.has(MODEL_MAP[id]),
+      reasoning_capable: REASONING_MODELS.has(id),
     })),
   });
 });
@@ -116,24 +158,28 @@ app.get("/v1/models", (_, res) => {
 /* ------------------ MAIN ------------------ */
 
 app.post("/v1/chat/completions", async (req, res) => {
+  const body = req.body;
+
+  if (!NIM_API_KEY) {
+    return res.status(401).json({ error: "Missing NIM_API_KEY" });
+  }
+
+  if (!body || !Array.isArray(body.messages)) {
+    return res.status(400).json({ error: "messages required" });
+  }
+
+  const model = resolveModel(body.model);
+  const nimBody = buildBody(body, model);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  // If the client disconnects, stop the upstream request/stream too.
+  res.on("close", () => controller.abort());
+
+  let upstream;
   try {
-    if (!NIM_API_KEY) {
-      return res.status(401).json({ error: "Missing NIM_API_KEY" });
-    }
-
-    const body = req.body;
-
-    if (!body.messages || !Array.isArray(body.messages)) {
-      return res.status(400).json({ error: "messages required" });
-    }
-
-    const model = resolveModel(body.model);
-    const nimBody = buildBody(body, model);
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
-
-    const response = await fetch(`${NIM_API_BASE}/chat/completions`, {
+    upstream = await fetch(`${NIM_API_BASE}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${NIM_API_KEY}`,
@@ -142,70 +188,80 @@ app.post("/v1/chat/completions", async (req, res) => {
       body: JSON.stringify(nimBody),
       signal: controller.signal,
     });
-
+  } catch (err) {
     clearTimeout(timeout);
+    if (err.name === "AbortError") {
+      return res.headersSent ? res.end() : res.status(504).json({ error: "timeout" });
+    }
+    console.error(err);
+    return res.status(502).json({ error: "upstream request failed" });
+  }
 
-    /* -------- STREAM -------- */
+  /* -------- STREAM -------- */
+  if (body.stream) {
+    if (!upstream.ok) {
+      clearTimeout(timeout);
+      const err = await upstream.json().catch(() => ({}));
+      return res.status(upstream.status).json(err);
+    }
 
-    if (body.stream) {
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        return res.status(response.status).json(err);
-      }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
 
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      });
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    const transformer = body.enable_reasoning ? createReasoningTransformer() : null;
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
+    try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        let chunk = decoder.decode(value, { stream: true });
-
-        if (body.enable_reasoning) {
-          chunk = rewriteChunk(chunk);
-        }
-
-        res.write(chunk);
+        const chunk = decoder.decode(value, { stream: true });
+        res.write(transformer ? transformer.push(chunk) : chunk);
       }
 
+      if (transformer) {
+        const tail = transformer.flush();
+        if (tail) res.write(tail);
+      }
+    } catch (err) {
+      if (err.name !== "AbortError") console.error("stream error:", err);
+    } finally {
+      clearTimeout(timeout);
+      reader.cancel().catch(() => {});
       res.end();
-      return;
     }
+    return;
+  }
 
-    /* -------- NON STREAM -------- */
+  /* -------- NON STREAM -------- */
+  try {
+    const data = await upstream.json();
 
-    const data = await response.json();
-
-    if (body.enable_reasoning && data.choices) {
+    if (body.enable_reasoning && Array.isArray(data.choices)) {
       data.choices = data.choices.map((choice) => {
         const reasoning = choice.message?.reasoning_content;
         const content = choice.message?.content || "";
 
         if (reasoning) {
-          choice.message.content =
-            `<think>\n${reasoning}\n</think>\n\n` + content;
+          choice.message.content = `<think>\n${reasoning}\n</think>\n\n${content}`;
+          delete choice.message.reasoning_content;
         }
 
         return choice;
       });
     }
 
-    res.status(response.status).json(data);
-
+    res.status(upstream.status).json(data);
   } catch (err) {
-    if (err.name === "AbortError") {
-      return res.status(504).json({ error: "timeout" });
-    }
-
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(502).json({ error: "invalid upstream response" });
+  } finally {
+    clearTimeout(timeout);
   }
 });
 
