@@ -18,18 +18,18 @@ if (!NIM_API_KEY) {
 
 const REASONING_MODELS = new Set([
   "minimaxai/minimax-m2.7",
-  "z-ai/glm4.7",
+  "minimaxai/minimax-m3",
   "google/gemma-4-31b-it",
   "deepseek-ai/deepseek-v4-pro",
-  "z-ai/glm-5.1",
+  "z-ai/glm-5.2",
 ]);
 
 const MODEL_MAP = {
-  "minimax": "minimaxai/minimax-m2.7",
-  "glm4.7": "z-ai/glm4.7",
+  "minimax-m2.7": "minimaxai/minimax-m2.7",
+  "minimax-m3": "minimaxai/minimax-m3",
   "gemma4": "google/gemma-4-31b-it",
   "deepseek-v4-pro": "deepseek-ai/deepseek-v4-pro",
-  "glm5.1": "z-ai/glm-5.1",
+  "glm5.2": "z-ai/glm-5.2",
 };
 
 /* ------------------ HELPERS ------------------ */
