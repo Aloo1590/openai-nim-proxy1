@@ -17,14 +17,6 @@ if (!NIM_API_KEY) {
 
 /* ------------------ MODELS ------------------ */
 
-const REASONING_MODELS = new Set([
-  "stepfun-ai/step-3.7-flash",
-  "minimaxai/minimax-m3",
-  "google/gemma-4-31b-it",
-  "deepseek-ai/deepseek-v4-pro",
-  "z-ai/glm-5.2",
-]);
-
 const DEFAULT_MODEL = "meta/llama-3.1-8b-instruct";
 
 /* ------------------ HELPERS ------------------ */
@@ -42,7 +34,7 @@ function buildBody(body, model) {
     model,
   };
 
-  if (enable_reasoning && REASONING_MODELS.has(model)) {
+  if (enable_reasoning) {
     final.chat_template_kwargs = {
       ...(rest.chat_template_kwargs || {}),
       enable_thinking: true,
@@ -144,15 +136,21 @@ app.get("/health", (_, res) => {
   res.json({ ok: true });
 });
 
-app.get("/v1/models", (_, res) => {
-  res.json({
-    object: "list",
-    data: [...REASONING_MODELS, DEFAULT_MODEL].map((id) => ({
-      id,
-      object: "model",
-      reasoning_capable: REASONING_MODELS.has(id),
-    })),
-  });
+app.get("/v1/models", async (_, res) => {
+  if (!NIM_API_KEY) {
+    return res.status(401).json({ error: "Missing NIM_API_KEY" });
+  }
+
+  try {
+    const upstream = await fetch(`${NIM_API_BASE}/models`, {
+      headers: { Authorization: `Bearer ${NIM_API_KEY}` },
+    });
+    const data = await upstream.json();
+    res.status(upstream.status).json(data);
+  } catch (err) {
+    console.error("models fetch failed:", err);
+    res.status(502).json({ error: "failed to fetch model list from NIM" });
+  }
 });
 
 /* ------------------ MAIN ------------------ */
