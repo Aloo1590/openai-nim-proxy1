@@ -17,7 +17,7 @@ if (!NIM_API_KEY) {
 /* ------------------ MODELS ------------------ */
 
 const REASONING_MODELS = new Set([
-  "minimaxai/minimax-m2.7",
+  "stepfun-ai/step-3.7-flash",
   "minimaxai/minimax-m3",
   "google/gemma-4-31b-it",
   "deepseek-ai/deepseek-v4-pro",
@@ -25,7 +25,7 @@ const REASONING_MODELS = new Set([
 ]);
 
 const MODEL_MAP = {
-  "minimax-m2.7": "minimaxai/minimax-m2.7",
+  "step": "stepfun-ai/step-3.7-flash",
   "minimax-m3": "minimaxai/minimax-m3",
   "gemma4": "google/gemma-4-31b-it",
   "deepseek-v4-pro": "deepseek-ai/deepseek-v4-pro",
