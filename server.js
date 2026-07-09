@@ -14,13 +14,13 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
+// 🔥 REASONING DISPLAY TOGGLE
+const SHOW_REASONING = false;
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
+// 🔥 THINKING MODE TOGGLE
+const ENABLE_THINKING_MODE = false;
 
-// Model mapping (adjust based on available NIM models)
+// Model mapping
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'z-ai/glm-5.2',
   'gpt-4': 'minimaxai/minimax-m3',
@@ -41,7 +41,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// List models endpoint (OpenAI compatible)
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -49,14 +48,10 @@ app.get('/v1/models', (req, res) => {
     created: Date.now(),
     owned_by: 'nvidia-nim-proxy'
   }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
+  res.json({ object: 'list', data: models });
 });
 
-// Chat completions endpoint (main proxy)
+// Chat completions endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
@@ -65,13 +60,15 @@ app.post('/v1/chat/completions', async (req, res) => {
     let nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
       try {
+        // 🔥 ADDED TIMEOUT: Prevents proxy hang if validation request stalls
         await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
           messages: [{ role: 'user', content: 'test' }],
           max_tokens: 1
         }, {
           headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
+          validateStatus: (status) => status < 500,
+          timeout: 5000 
         }).then(res => {
           if (res.status >= 200 && res.status < 300) {
             nimModel = model;
@@ -80,7 +77,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       } catch (e) {}
       
       if (!nimModel) {
-        const modelLower = model.toLowerCase();
+        const modelLower = (model || '').toLowerCase();
         if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
           nimModel = 'meta/llama-3.1-405b-instruct';
         } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
@@ -91,15 +88,19 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // 🔥 THE FIX: Transform OpenAI request to NIM format dynamically
-    // We spread req.body to preserve Janitor's character settings (top_p, presence_penalty, etc.)
+    // 🔥 THE FIX: Target safe parameters instead of blind payload spreading
     const nimRequest = {
-      ...req.body,
       model: nimModel,
+      messages: messages,
       temperature: temperature ?? 0.6,
-      max_tokens: max_tokens ?? 9024,
+      max_tokens: max_tokens ?? 4096, // Reduced from 9024 to prevent memory alloc stalls on NVIDIA's side
       stream: stream || false
     };
+
+    // Safely carry over standard character settings if Janitor provides them
+    if (req.body.top_p !== undefined) nimRequest.top_p = req.body.top_p;
+    if (req.body.frequency_penalty !== undefined) nimRequest.frequency_penalty = req.body.frequency_penalty;
+    if (req.body.presence_penalty !== undefined) nimRequest.presence_penalty = req.body.presence_penalty;
 
     if (ENABLE_THINKING_MODE) {
       nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
@@ -110,24 +111,22 @@ app.post('/v1/chat/completions', async (req, res) => {
       delete nimRequest.logprobs;
       delete nimRequest.top_logprobs;
       
-      // If Janitor still throws a 400 Bad Request, NVIDIA NIM might be 
-      // rejecting Janitor's specific penalty formatting for GLM. 
-      // Uncomment the next two lines if it still fails:
-      // delete nimRequest.frequency_penalty;
-      // delete nimRequest.presence_penalty;
+      // Forcefully strip penalties for GLM to prevent silent api hang
+      delete nimRequest.frequency_penalty;
+      delete nimRequest.presence_penalty;
     }
     
-    // Make request to NVIDIA NIM API
+    // Make request to NVIDIA NIM API with a HARD TIMEOUT
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json'
+      responseType: stream ? 'stream' : 'json',
+      timeout: 60000 // Prevents infinite loading if NVIDIA stalls
     });
     
     if (stream) {
-      // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -144,6 +143,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
               res.write(line + '\n');
+              res.end(); // 🔥 CRITICAL FIX: Explicitly sever the TCP connection so ReqBin knows it's over!
               return;
             }
             
@@ -197,7 +197,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      // Transform NIM response to OpenAI format with reasoning
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -242,7 +241,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Catch-all for unsupported endpoints
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
@@ -255,7 +253,4 @@ app.all('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
 });
