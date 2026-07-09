@@ -9,7 +9,7 @@ app.use(express.json({ limit: "20mb" }));
 
 const NIM_API_KEY = process.env.NIM_API_KEY;
 const NIM_API_BASE = "https://integrate.api.nvidia.com/v1";
-const REQUEST_TIMEOUT_MS = 120_000;
+const REQUEST_TIMEOUT_MS = 280_000;
 
 if (!NIM_API_KEY) {
   console.warn("⚠️ NIM_API_KEY not set");
@@ -48,7 +48,7 @@ function buildBody(body, model) {
   if (REASONING_KWARGS_MODELS.has(model)) {
     final.chat_template_kwargs = {
       enable_thinking: true,
-      clear_thinking: true,
+      clear_thinking: false,
       ...(rest.chat_template_kwargs || {}),
     };
   }
@@ -185,6 +185,8 @@ app.post("/v1/chat/completions", async (req, res) => {
 
   const model = resolveModel(body.model);
   const nimBody = buildBody(body, model);
+
+  console.log(`[proxy] -> ${model} | stream=${!!body.stream} | body=${JSON.stringify(nimBody)}`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
