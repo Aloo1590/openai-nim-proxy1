@@ -19,6 +19,13 @@ if (!NIM_API_KEY) {
 
 const DEFAULT_MODEL = "meta/llama-3.1-8b-instruct";
 
+// Models known to require explicit chat_template_kwargs to enable
+// thinking/reasoning mode on NIM. Add to this list as needed.
+const REASONING_KWARGS_MODELS = new Set([
+  "z-ai/glm-5.2",
+  // "minimaxai/minimax-...", // add exact NIM model id if it also needs this
+]);
+
 /* ------------------ HELPERS ------------------ */
 
 function resolveModel(model) {
@@ -27,6 +34,7 @@ function resolveModel(model) {
 }
 
 function buildBody(body, model) {
+  // Strip any client-sent custom fields so we don't forward garbage upstream.
   const { enable_reasoning, clear_thinking, ...rest } = body;
 
   const final = {
@@ -34,11 +42,14 @@ function buildBody(body, model) {
     model,
   };
 
-  if (enable_reasoning) {
+  // Force-enable thinking for models that require it, regardless of
+  // whether the client (Janitor) knows to ask for it. Client-provided
+  // chat_template_kwargs (if any) are preserved/merged on top.
+  if (REASONING_KWARGS_MODELS.has(model)) {
     final.chat_template_kwargs = {
-      ...(rest.chat_template_kwargs || {}),
       enable_thinking: true,
-      clear_thinking: clear_thinking !== false,
+      clear_thinking: true,
+      ...(rest.chat_template_kwargs || {}),
     };
   }
 
@@ -48,6 +59,12 @@ function buildBody(body, model) {
 /* ------------------ STREAM FIX ------------------ */
 /**
  * Creates a stateful transformer for one streaming request.
+ *
+ * Always active now (not gated behind a client-sent flag), since
+ * Janitor AI never sends custom fields and has no way to opt in.
+ * It's a no-op for models that never emit reasoning_content (e.g.
+ * stepfun), and folds reasoning into content for models that do
+ * (e.g. glm-5.2, minimax).
  *
  * Fixes vs. the original implementation:
  *  1. Buffers partial lines across chunk boundaries. `reader.read()` chunks
@@ -211,7 +228,11 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
-    const transformer = body.enable_reasoning ? createReasoningTransformer() : null;
+    // Always run the transformer. It's a no-op pass-through for models
+    // that never send reasoning_content (e.g. stepfun), and folds
+    // reasoning into content for models that do (e.g. glm-5.2, minimax) —
+    // regardless of whether the client sent any custom flag.
+    const transformer = createReasoningTransformer();
 
     try {
       while (true) {
@@ -219,13 +240,11 @@ app.post("/v1/chat/completions", async (req, res) => {
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        res.write(transformer ? transformer.push(chunk) : chunk);
+        res.write(transformer.push(chunk));
       }
 
-      if (transformer) {
-        const tail = transformer.flush();
-        if (tail) res.write(tail);
-      }
+      const tail = transformer.flush();
+      if (tail) res.write(tail);
     } catch (err) {
       if (err.name !== "AbortError") console.error("stream error:", err);
     } finally {
@@ -240,7 +259,7 @@ app.post("/v1/chat/completions", async (req, res) => {
   try {
     const data = await upstream.json();
 
-    if (body.enable_reasoning && Array.isArray(data.choices)) {
+    if (Array.isArray(data.choices)) {
       data.choices = data.choices.map((choice) => {
         const reasoning = choice.message?.reasoning_content;
         const content = choice.message?.content || "";
