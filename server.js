@@ -92,13 +92,17 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
     // Transform OpenAI request to NIM format
+    // NOTE: logprobs / top_logprobs are intentionally NOT forwarded here.
+    // Even if the client (e.g. Janitor AI, ReqBin, etc.) sends logprobs: true
+    // or top_logprobs, we strip it below and force it off on every request.
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: stream || false
+      stream: stream || false,
+      logprobs: false // 🔒 force token probabilities OFF regardless of client request
     };
     
     // Make request to NVIDIA NIM API
@@ -133,6 +137,12 @@ app.post('/v1/chat/completions', async (req, res) => {
             
             try {
               const data = JSON.parse(line.slice(6));
+
+              // Strip any logprobs data NIM might still include on the response
+              if (data.choices?.[0]) {
+                delete data.choices[0].logprobs;
+              }
+
               if (data.choices?.[0]?.delta) {
                 const reasoning = data.choices[0].delta.reasoning_content;
                 const content = data.choices[0].delta.content;
@@ -200,6 +210,7 @@ app.post('/v1/chat/completions', async (req, res) => {
               role: choice.message.role,
               content: fullContent
             },
+            // logprobs intentionally omitted here too
             finish_reason: choice.finish_reason
           };
         }),
@@ -242,4 +253,5 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Token probabilities (logprobs): DISABLED`);
 });
