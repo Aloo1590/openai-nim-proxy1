@@ -1,54 +1,60 @@
 const express = require('express');
 const cors = require('cors');
-const https = require('https'); // Built-in Node module, zero SDKs required
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post('/v1/chat/completions', (req, res) => {
-  // 1. Force a safe max_tokens if missing. Unbounded requests on GLM's 1M context cause internal stalls.
-  if (!req.body.max_tokens) {
-    req.body.max_tokens = 4096;
-  }
-  
-  const payload = JSON.stringify(req.body);
+app.post('/v1/chat/completions', async (req, res) => {
+  try {
+    const payload = JSON.stringify(req.body);
 
-  const options = {
-    hostname: 'integrate.api.nvidia.com',
-    port: 443,
-    path: '/v1/chat/completions',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`,
-      'Content-Length': Buffer.byteLength(payload),
-      // 🔥 THE MAGIC BULLET: Spoof curl to bypass the WAF blocking Node.js/OpenAI SDKs
-      'User-Agent': 'curl/7.68.0',
-      'Accept': '*/*'
+    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`,
+        // 🔥 THE FIX: Tell NVIDIA to close the socket immediately so Node doesn't pool it
+        'Connection': 'close' 
+      },
+      body: payload,
+      // 🔥 THE FIX: Explicitly disable Node.js's native socket pooling
+      keepalive: false 
+    });
+
+    // Pass the exact status back
+    res.status(response.status);
+
+    // Stream the raw response directly back to ReqBin / Janitor
+    if (response.body) {
+      // Set stream headers if the frontend requested a stream
+      if (req.body.stream) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'close');
+      }
+      
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
+      }
+      res.end();
+    } else {
+      res.end();
     }
-  };
 
-  // 2. Open a raw TCP-like connection directly to NVIDIA
-  const proxyReq = https.request(options, (proxyRes) => {
-    // Pass NVIDIA's response headers back to ReqBin/Janitor
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    // Pipe the raw byte stream. This natively handles both JSON and SSE Streaming without manual chunk parsing.
-    proxyRes.pipe(res);
-  });
-
-  proxyReq.on('error', (error) => {
-    console.error('NVIDIA Connection Error:', error.message);
+  } catch (error) {
+    console.error('Fetch error:', error.message);
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
     }
-  });
-
-  // 3. Fire the payload
-  proxyReq.write(payload);
-  proxyReq.end();
+  }
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Stealth cURL Proxy running on port', process.env.PORT || 3000);
+  console.log('Dead-Socket Bypass Proxy running on port', process.env.PORT || 3000);
 });
