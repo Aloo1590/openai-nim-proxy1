@@ -6,13 +6,14 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
+// 50mb limit permanently fixes the 413 Payload Too Large error for long chats
 app.use(express.json({ limit: '50mb' }));
 
 const modelMap = {
   "glm": "z-ai/glm-5.2",
   "deepseek": "deepseek-ai/deepseek-v4-pro", 
   "minimax": "minimaxai/minimax-m3",
-  "stepfun": "stepfun-ai/stepfun-flash"
+  "stepfun": "stepfun-ai/step-3.7-flash"
 };
 
 app.post('/v1/chat/completions', async (req, res) => {
@@ -22,17 +23,26 @@ app.post('/v1/chat/completions', async (req, res) => {
     const requestedModel = incomingBody.model?.toLowerCase();
     const realModelName = modelMap[requestedModel] || incomingBody.model;
 
+    // Pass the payload exactly as your Janitor AI UI generated it.
+    // Zero interference with your max_tokens, temperature, or top_p.
     const proxyBody = {
       ...incomingBody,
-      model: realModelName,
-      max_tokens: incomingBody.max_tokens > 0 ? incomingBody.max_tokens : 4096
+      model: realModelName
     };
 
-    // THE ADDITION: Force the thinking parameters on for GLM 5.2
+    // INJECT REASONING KWARGS BASED ON THE MODEL
     if (realModelName === "z-ai/glm-5.2") {
       proxyBody.chat_template_kwargs = {
         "enable_thinking": true,
         "clear_thinking": false
+      };
+    } else if (realModelName === "deepseek-ai/deepseek-v4-pro") {
+      proxyBody.chat_template_kwargs = {
+        "thinking": true
+      };
+    } else if (realModelName === "minimaxai/minimax-m3") {
+      proxyBody.chat_template_kwargs = {
+        "thinking_mode": "enabled"
       };
     }
 
