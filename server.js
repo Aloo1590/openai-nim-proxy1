@@ -1,60 +1,71 @@
-const express = require('express');
-const cors = require('cors');
+import express from 'express';
+import cors from 'cors';
+import { Readable } from 'stream';
 
 const app = express();
+const port = process.env.PORT || 3000;
+
+// Enable CORS so Janitor AI can connect
 app.use(cors());
 app.use(express.json());
 
+// THE TRANSLATOR DICTIONARY
+// You can add or edit any model mappings here.
+const modelMap = {
+  "glm": "z-ai/glm-5.2",
+  "deepseek": "deepseek-ai/deepseek-v4-pro", 
+  "minimax": "minimaxai/minimax-m3",
+  "stepfun": "stepfun-ai/stepfun-flash"
+};
+
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const payload = JSON.stringify(req.body);
+    const incomingBody = req.body;
+    
+    // Check if the user typed a simple name in Janitor. 
+    // If it's not in the dictionary, it just passes whatever they typed directly.
+    const requestedModel = incomingBody.model?.toLowerCase();
+    const realModelName = modelMap[requestedModel] || incomingBody.model;
 
-    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-      method: 'POST',
+    const proxyBody = {
+      ...incomingBody,
+      model: realModelName,
+      // Fallback token limit just in case Janitor omits it
+      max_tokens: incomingBody.max_tokens > 0 ? incomingBody.max_tokens : 4096
+    };
+
+    // Forward the translated payload to NVIDIA
+    const fetchResponse = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`,
-        // 🔥 THE FIX: Tell NVIDIA to close the socket immediately so Node doesn't pool it
-        'Connection': 'close' 
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
+        // Spoofing the User-Agent to avoid any leftover WAF blocks
+        "User-Agent": "curl/8.5.0",
+        "Accept": "*/*"
       },
-      body: payload,
-      // 🔥 THE FIX: Explicitly disable Node.js's native socket pooling
-      keepalive: false 
+      body: JSON.stringify(proxyBody)
     });
 
-    // Pass the exact status back
-    res.status(response.status);
+    // Copy NVIDIA's response headers back to Janitor
+    fetchResponse.headers.forEach((value, name) => {
+      res.setHeader(name, value);
+    });
+    res.status(fetchResponse.status);
 
-    // Stream the raw response directly back to ReqBin / Janitor
-    if (response.body) {
-      // Set stream headers if the frontend requested a stream
-      if (req.body.stream) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'close');
-      }
-      
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(decoder.decode(value, { stream: true }));
-      }
-      res.end();
+    // Stream the data back flawlessly
+    if (fetchResponse.body) {
+      Readable.fromWeb(fetchResponse.body).pipe(res);
     } else {
       res.end();
     }
 
   } catch (error) {
-    console.error('Fetch error:', error.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
+    console.error("Proxy Error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log('Dead-Socket Bypass Proxy running on port', process.env.PORT || 3000);
+app.listen(port, () => {
+  console.log(`Render Proxy listening on port ${port}`);
 });
