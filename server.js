@@ -10,10 +10,10 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const modelMap = {
-  "glm": "z-ai/glm-5.2",
+  "glm": "z-ai/glm-5.3",
   "deepseek": "deepseek-ai/deepseek-v4-pro", 
   "minimax": "minimaxai/minimax-m3",
-  "stepfun": "stepfun-ai/step-3.7-flash"
+  "kimi": "moonshotai/kimi-k3"
 };
 
 app.post('/v1/chat/completions', async (req, res) => {
@@ -31,7 +31,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     };
 
     // INJECT REASONING KWARGS BASED ON THE MODEL
-    if (realModelName === "z-ai/glm-5.2") {
+    if (realModelName === "z-ai/glm-5.3") {
       proxyBody.chat_template_kwargs = {
         "enable_thinking": true,
         "clear_thinking": false
@@ -40,7 +40,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       proxyBody.chat_template_kwargs = {
         "thinking": true
       };
-    } else if (realModelName === "minimaxai/minimax-m3") {
+    } else if (realModelName === "moonshotai/kimi-k3) {
       proxyBody.chat_template_kwargs = {
         "thinking_mode": "enabled"
       };
