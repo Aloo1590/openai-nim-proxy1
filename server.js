@@ -6,44 +6,63 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-// 50mb limit permanently fixes the 413 Payload Too Large error for long chats
 app.use(express.json({ limit: '50mb' }));
 
-const modelMap = {
-  "glm": "z-ai/glm-5.3",
-  "deepseek": "deepseek-ai/deepseek-v4-pro", 
-  "minimax": "minimaxai/minimax-m3",
-  "kimi": "moonshotai/kimi-k3"
+// ============================================================
+// SINGLE SOURCE OF TRUTH — edit only this block when models change.
+// key      = the short name your client sends (e.g. "glm")
+// realName = the exact upstream model string NVIDIA expects
+// kwargs   = the chat_template_kwargs to inject for that model
+//            (set to null if a model needs no special kwargs)
+// ============================================================
+const MODEL_CONFIG = {
+  glm: {
+    realName: "z-ai/glm-5.3",
+    kwargs: { enable_thinking: true, clear_thinking: false }
+  },
+  deepseek: {
+    realName: "deepseek-ai/deepseek-v4-pro",
+    kwargs: { thinking: true }
+  },
+  minimax: {
+    realName: "minimaxai/minimax-m3",
+    kwargs: null
+  },
+  kimi: {
+    realName: "moonshotai/kimi-k3",
+    kwargs: { thinking_mode: "enabled" }
+  }
 };
+// ============================================================
+
+const HOP_BY_HOP_OR_UNSAFE_HEADERS = [
+  'content-encoding',
+  'content-length',
+  'transfer-encoding',
+  'connection'
+];
 
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const incomingBody = req.body;
-    
-    const requestedModel = incomingBody.model?.toLowerCase();
-    const realModelName = modelMap[requestedModel] || incomingBody.model;
+    const requestedKey = incomingBody.model?.toLowerCase();
+    const config = MODEL_CONFIG[requestedKey];
 
-    // Pass the payload exactly as your Janitor AI UI generated it.
-    // Zero interference with your max_tokens, temperature, or top_p.
+    // Fall back to passing the raw model string through untouched
+    // if it's not one of our known short names.
+    const realModelName = config ? config.realName : incomingBody.model;
+
+    if (!realModelName) {
+      return res.status(400).json({ error: "No model specified in request body." });
+    }
+
     const proxyBody = {
       ...incomingBody,
       model: realModelName
     };
 
-    // INJECT REASONING KWARGS BASED ON THE MODEL
-    if (realModelName === "z-ai/glm-5.3") {
-      proxyBody.chat_template_kwargs = {
-        "enable_thinking": true,
-        "clear_thinking": false
-      };
-    } else if (realModelName === "deepseek-ai/deepseek-v4-pro") {
-      proxyBody.chat_template_kwargs = {
-        "thinking": true
-      };
-    } else if (realModelName === "moonshotai/kimi-k3) {
-      proxyBody.chat_template_kwargs = {
-        "thinking_mode": "enabled"
-      };
+    if (config?.kwargs) {
+      proxyBody.chat_template_kwargs = config.kwargs;
     }
 
     const fetchResponse = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
@@ -58,7 +77,9 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
 
     fetchResponse.headers.forEach((value, name) => {
-      res.setHeader(name, value);
+      if (!HOP_BY_HOP_OR_UNSAFE_HEADERS.includes(name.toLowerCase())) {
+        res.setHeader(name, value);
+      }
     });
     res.status(fetchResponse.status);
 
@@ -67,12 +88,19 @@ app.post('/v1/chat/completions', async (req, res) => {
     } else {
       res.end();
     }
-
   } catch (error) {
     console.error("Proxy Error:", error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    } else {
+      res.end();
+    }
   }
 });
+
+if (!process.env.NVIDIA_API_KEY) {
+  console.warn("WARNING: NVIDIA_API_KEY is not set. All upstream requests will fail with 401.");
+}
 
 app.listen(port, () => {
   console.log(`Render Proxy listening on port ${port}`);
