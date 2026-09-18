@@ -10,28 +10,30 @@ app.use(express.json({ limit: '50mb' }));
 
 // ============================================================
 // SINGLE SOURCE OF TRUTH — edit only this block when models change.
-// key      = the short name your client sends (e.g. "glm")
-// realName = the exact upstream model string NVIDIA expects
-// kwargs   = the chat_template_kwargs to inject for that model
-//            (set to null if a model needs no special kwargs)
+//
+// THINKING_STYLES: the different chat_template_kwargs shapes seen
+// across model families. Add a new style only if a new vendor uses
+// a shape you don't already have. These are DEFAULTS — if the
+// incoming request already sets chat_template_kwargs, those values
+// win (thinking is not forced).
+//
+// MODEL_CONFIG: key = short name your client sends,
+//               value = [realName, style]
+// style must match a key in THINKING_STYLES, or "none" for no kwargs.
 // ============================================================
+const THINKING_STYLES = {
+  glm:      { enable_thinking: true },
+  deepseek: { thinking: true },
+  kimi:     { thinking_mode: "enabled" },
+  none:     null
+};
+
 const MODEL_CONFIG = {
-  glm: {
-    realName: "z-ai/glm-5.3",
-    kwargs: { enable_thinking: true, clear_thinking: false }
-  },
-  deepseek: {
-    realName: "deepseek-ai/deepseek-v4-pro",
-    kwargs: { thinking: true }
-  },
-  minimax: {
-    realName: "minimaxai/minimax-m3",
-    kwargs: null
-  },
-  kimi: {
-    realName: "moonshotai/kimi-k3",
-    kwargs: { thinking_mode: "enabled" }
-  }
+  glm:          ["z-ai/glm-5.3",                "glm"],
+  glmflash:     ["z-ai/glm-5.3-flash",          "glm"],
+  deepseek:     ["deepseek-ai/deepseek-v4-pro", "deepseek"],
+  minimax:      ["minimaxai/minimax-m3",        "none"],
+  kimi:         ["moonshotai/kimi-k3",          "kimi"],
 };
 // ============================================================
 
@@ -46,11 +48,12 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const incomingBody = req.body;
     const requestedKey = incomingBody.model?.toLowerCase();
-    const config = MODEL_CONFIG[requestedKey];
+    const entry = MODEL_CONFIG[requestedKey];
 
     // Fall back to passing the raw model string through untouched
     // if it's not one of our known short names.
-    const realModelName = config ? config.realName : incomingBody.model;
+    const [realModelName, style] = entry || [incomingBody.model, null];
+    const defaultKwargs = style ? THINKING_STYLES[style] : null;
 
     if (!realModelName) {
       return res.status(400).json({ error: "No model specified in request body." });
@@ -61,8 +64,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: realModelName
     };
 
-    if (config?.kwargs) {
-      proxyBody.chat_template_kwargs = config.kwargs;
+    if (defaultKwargs) {
+      proxyBody.chat_template_kwargs = {
+        ...defaultKwargs,
+        ...(incomingBody.chat_template_kwargs || {})
+      };
     }
 
     const fetchResponse = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
