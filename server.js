@@ -22,7 +22,7 @@ app.use(express.json({ limit: '50mb' }));
 // style must match a key in THINKING_STYLES, or "none" for no kwargs.
 // ============================================================
 const THINKING_STYLES = {
-  glm:      { enable_thinking: true },
+  glm:      { enable_thinking: false },
   deepseek: { thinking: true },
   kimi:     { thinking_mode: "enabled" },
   none:     null
